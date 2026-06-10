@@ -97,7 +97,7 @@ models/
     train.py                   # Optuna-tuned training (logs to MLflow)
     forecast.py                # generates forecast CSV, writes to S3
   ec2/
-    train.py                   # Optuna-tuned training + email alert
+    train.py                   # Optuna-tuned training + email alert (logs to MLflow)
     forecast.py                # forecast generation (EC2 variant)
 
 api/
