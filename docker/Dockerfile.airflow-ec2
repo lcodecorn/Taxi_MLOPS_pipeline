@@ -1,0 +1,24 @@
+# EC2 variant of the Airflow image.
+# Functionally identical to ./Dockerfile.airflow — boto3 and requests (used by
+# the stop_self task in dags/taxi_model_pipeline_ec2.py) are already pulled in
+# via requirements/airflow.txt, so no new packages are needed here.
+#
+# The only EC2-specific note is operational, not something that belongs in
+# the image itself: the host's Docker daemon must be enabled to start on boot
+# (`systemctl enable docker`) and the stack must be brought up automatically
+# (e.g. a systemd unit or EC2 user-data script running `docker compose up -d`
+# in this directory), so that when the start-Lambda boots the instance, the
+# whole pipeline comes back up without manual intervention.
+
+FROM apache/airflow:2.9.1
+
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgomp1 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+USER airflow
+
+COPY requirements/airflow.txt /requirements-airflow.txt
+RUN pip install --no-cache-dir -r /requirements-airflow.txt

@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Airflow / pipeline runtime artifacts
+logs/
+plugins/__pycache__/
+*.db
+airflow.cfg
+standalone_admin_password.txt
+
+# Data
+data/
+*.csv
+*.parquet
+
+# Models / ML artifacts
+models/local/models/
+mlruns/
+mlartifacts/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

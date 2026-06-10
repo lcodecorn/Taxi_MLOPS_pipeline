@@ -1,0 +1,17 @@
+pandas
+numpy
+scikit-learn
+matplotlib
+seaborn
+jupyter
+apache-airflow
+mlflow
+fastapi
+uvicorn
+pytest
+requests
+joblib
+duckdb
+python-dotenv
+boto3
+pyarrow

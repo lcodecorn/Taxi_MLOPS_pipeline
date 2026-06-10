@@ -1,0 +1,14 @@
+# Runtime deps for DAGs and pipeline tasks (baked into custom Airflow image)
+boto3
+python-dotenv
+duckdb
+pandas
+pyarrow
+pytest
+scikit-learn
+lightgbm
+xgboost
+joblib
+requests
+mlflow
+optuna
