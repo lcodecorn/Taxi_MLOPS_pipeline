@@ -172,6 +172,7 @@ in memory (`api/engine.py`).
 
 ## Streamlit app
 
+Demo: https://lcodecorn-nyc-taxi.hf.space
 `app/streamlit_app.py` reads the latest `forecasts/*.csv` from S3, joins it
 with the NYC taxi zone GeoJSON, and renders a choropleth map with per-zone
 demand/profitability/competition/opportunity scores, plus a sortable zone
