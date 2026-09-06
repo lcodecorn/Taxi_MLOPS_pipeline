@@ -236,6 +236,10 @@ with DAG(
     features2 = BashOperator(
         task_id="features2",
         bash_command=f"{BASH_PREFIX} python preprocess/features.py",
+        env={
+            **os.environ,
+            "TARGET_MONTH": "{{ ti.xcom_pull(task_ids='get_month') }}",
+        },
     )
 
     get_month >> prune_old_data >> [download_data, fetch_weather] >> validate_data >> merge_everything >> features2

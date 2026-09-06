@@ -191,6 +191,37 @@ unzip NYC_taxi_deploy.zip -d NYC_taxi
 
 ---
 
+## Step 7.5 — Host MLflow on a Hugging Face Space
+
+MLflow does not run on this EC2 box — it runs as its own Docker Space on
+Hugging Face, reachable independent of whether the instance is stopped. The
+files for it are already in this repo at `mlflow_space/`.
+
+1. **Backend store** — create a free Postgres DB (e.g. [Neon](https://neon.tech)
+   or [Supabase](https://supabase.com)) and copy its connection string. HF
+   Space free tier has no durable disk across rebuilds, so this replaces the
+   Postgres-backed store the local/EC2 compose files use.
+2. **Create the Space** — huggingface.co/new-space → SDK: **Docker** →
+   push `mlflow_space/Dockerfile` and `mlflow_space/README.md` as the repo root
+   (`git remote add space https://huggingface.co/spaces/<user>/<space> && git push space main`,
+   or use the web UI's "upload files").
+3. **Set visibility to Private** — Settings → Visibility. This gates every
+   request behind an HF auth token at the platform level; no in-app auth
+   needed.
+4. **Add secrets** — Settings → Variables and secrets:
+   | Secret | Value |
+   |---|---|
+   | `BACKEND_STORE_URI` | the Postgres connection string from step 1 |
+   | `S3_BUCKET` | `taxi-mlops-nyc` |
+   | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | a narrow IAM user (S3 get/put/list on this bucket only — the Space has no instance role to inherit from) |
+   | `AWS_REGION` | `eu-north-1` |
+5. **Generate an access token** for EC2 to read the Space — huggingface.co/settings/tokens
+   → new token, **Read** role is enough. This is the value for
+   `MLFLOW_TRACKING_TOKEN` below.
+6. Note the Space URL: `https://<your-hf-username>-<your-space-name>.hf.space`.
+
+---
+
 ## Step 8 — Create .env on EC2
 
 ```bash
@@ -199,7 +230,8 @@ COMPOSE_PROJECT_NAME=nyc-taxi-mlops
 S3_BUCKET=taxi-mlops-nyc
 AWS_REGION=eu-north-1
 AIRFLOW_UID=1000
-MLFLOW_TRACKING_URI=http://mlflow:5000
+MLFLOW_TRACKING_URI=https://<your-hf-username>-<your-space-name>.hf.space
+MLFLOW_TRACKING_TOKEN=hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ALERT_EMAIL=your@email.com
 SMTP_USER=your@gmail.com
 SMTP_PASSWORD=your-16-char-app-password
@@ -207,7 +239,7 @@ OPTUNA_N_TRIALS=20
 EOF
 ```
 
-> No `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY` — the IAM role handles credentials automatically.
+> No `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY` — the IAM role handles credentials automatically. (The Hugging Face Space is a separate environment and needs its own AWS keys — set those as Space secrets, not here.)
 
 ---
 

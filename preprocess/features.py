@@ -14,14 +14,38 @@ All computation runs entirely inside DuckDB.
 ───────────────────────────────────────────────────────────────────────────────
 
 INPUT
-    data/final/demand_dataset_enriched.parquet
+    data/final/demand_dataset_enriched.parquet (full multi-month history)
 
-OUTPUTS
+OUTPUTS (S3 feature store, both append/upsert-by-month — see INCREMENTAL below)
     data/final/features.parquet
         Trip-level enriched features
 
     data/final/hourly_zone_timeseries.parquet
         Forecast-ready zone-hour feature store
+
+───────────────────────────────────────────────────────────────────────────────
+
+INCREMENTAL PROCESSING
+
+    The upstream enriched dataset keeps growing every month (it holds the
+    full retained history), but reprocessing all of it through the
+    window-function pipeline below every run made peak memory grow with
+    total history and eventually OOM-killed the task once retention passed
+    ~40M rows.
+
+    Instead, each run only reads the TARGET_MONTH plus a one calendar month
+    lookback buffer (comfortably more than the 168h/7-day lag & rolling
+    windows need) from the source parquet via a WHERE predicate, so DuckDB's
+    working set is ~2 months of data no matter how many months are retained
+    upstream. The buffer rows are used only to seed correct lag/rolling
+    values at the start of the target month; only the target month's rows
+    are written out. That freshly computed month is then upserted into the
+    existing S3 feature-store files (any previous rows for that month are
+    replaced, everything else untouched), so the two output files keep
+    accumulating full history while the compute step itself stays flat.
+
+    TARGET_MONTH env var (YYYY-MM) selects the month; defaults to the
+    previous calendar month if unset.
 
 ───────────────────────────────────────────────────────────────────────────────
 
@@ -54,13 +78,15 @@ TARGET USE CASES
 """
 
 
-from pathlib import Path
+import calendar
+import os
+from datetime import datetime, timedelta
+
+import boto3
 import duckdb
 import pandas as pd
-import boto3
-import io
+from botocore.exceptions import ClientError
 from dotenv import load_dotenv
-import os
 
 load_dotenv()
 S3_BUCKET = os.getenv("S3_BUCKET")
@@ -73,27 +99,69 @@ OUT_TS_S3_KEY = "final/hourly_zone_timeseries.parquet"
 
 # Local temp paths (DuckDB reads/writes these; then upload to S3)
 TMP_INPUT = "/tmp/input.parquet"
-TMP_FEATURES = "/tmp/features.parquet"
-TMP_TIMESERIES = "/tmp/hourly_zone_timeseries.parquet"
+TMP_FEATURES_MONTH = "/tmp/features_month.parquet"       # target month + buffer
+TMP_TIMESERIES_MONTH = "/tmp/hourly_zone_timeseries_month.parquet"  # target month only
+TMP_EXISTING = "/tmp/existing_store.parquet"
+TMP_MERGED = "/tmp/merged_store.parquet"
 
+LOOKBACK_MONTHS = 1  # >> the 168h/7-day lag & rolling windows; cheap insurance
+
+
+def _resolve_target_month() -> str:
+    raw = os.getenv("TARGET_MONTH", "").strip()
+    if raw:
+        datetime.strptime(raw, "%Y-%m")  # validate format, raise if malformed
+        return raw
+    prev_month_last_day = datetime.utcnow().replace(day=1) - timedelta(days=1)
+    return prev_month_last_day.strftime("%Y-%m")
+
+
+def _add_months(dt: datetime, months: int) -> datetime:
+    month_index = dt.month - 1 + months
+    year = dt.year + month_index // 12
+    month = month_index % 12 + 1
+    return dt.replace(year=year, month=month)
+
+
+TARGET_MONTH = _resolve_target_month()
+month_start = datetime.strptime(TARGET_MONTH, "%Y-%m")
+days_in_month = calendar.monthrange(month_start.year, month_start.month)[1]
+month_end = month_start + timedelta(days=days_in_month)  # exclusive
+buffer_start = _add_months(month_start, -LOOKBACK_MONTHS)
+
+print(
+    f"Target month: {TARGET_MONTH}  "
+    f"(reading {buffer_start:%Y-%m-%d} -> {month_end:%Y-%m-%d}, "
+    f"writing rows >= {month_start:%Y-%m-%d})"
+)
 
 obj = s3.get_object(Bucket=S3_BUCKET, Key=INPUT_S3_KEY)
 with open(TMP_INPUT, "wb") as f:
     f.write(obj["Body"].read())
 
-# DuckDB setup
+# DuckDB setup. Even bounded to ~2 months of data, cap memory and let DuckDB
+# spill to disk instead of getting OOM-killed if a month is unexpectedly big.
 con = duckdb.connect()
-con.execute("PRAGMA threads=8")
+con.execute("PRAGMA threads=4")
+con.execute("PRAGMA memory_limit='3GB'")
+con.execute("PRAGMA temp_directory='/tmp/duckdb_spill'")
 
+MONTH_WINDOW_FILTER = f"""
+    tpep_pickup_datetime >= TIMESTAMP '{buffer_start:%Y-%m-%d}'
+    AND tpep_pickup_datetime < TIMESTAMP '{month_end:%Y-%m-%d}'
+"""
 
-# Input row count
+# Input row count actually loaded for this run (buffer + target month only,
+# not the full retained history)
 n_total = con.execute(f"""
     SELECT COUNT(*)
     FROM read_parquet('{TMP_INPUT}')
+    WHERE {MONTH_WINDOW_FILTER}
 """).fetchone()[0]
-print(f"\nInput rows: {n_total:,}")
+print(f"\nInput rows for {TARGET_MONTH} window: {n_total:,}")
 
-# 1. TRIP-LEVEL FEATURE ENGINEERING
+# 1. TRIP-LEVEL FEATURE ENGINEERING (buffer + target month, so lag/rolling
+#    context is available; only target-month rows get persisted downstream)
 print("\nBuilding trip-level features...")
 con.execute(f"""
 COPY (
@@ -102,6 +170,7 @@ COPY (
             epoch(tpep_dropoff_datetime - tpep_pickup_datetime) / 60.0 AS trip_duration_min,
             GREATEST(fare_amount + extra + tip_amount + tolls_amount + Airport_fee, 0) AS revenue
         FROM read_parquet('{TMP_INPUT}')
+        WHERE {MONTH_WINDOW_FILTER}
     ),
     features AS (
         SELECT *,
@@ -136,14 +205,12 @@ COPY (
       AND trip_distance BETWEEN 0.1 AND 100
       AND revenue BETWEEN 3 AND 500
       AND revenue_per_hour BETWEEN 5 AND 500
-) TO '{TMP_FEATURES}' (FORMAT PARQUET)
+) TO '{TMP_FEATURES_MONTH}' (FORMAT PARQUET)
 """)
 
-with open(TMP_FEATURES, "rb") as f:
-    s3.upload_fileobj(f, S3_BUCKET, OUT_TRIPS_S3_KEY)
-print(f"Uploaded features.parquet to s3://{S3_BUCKET}/{OUT_TRIPS_S3_KEY}")
-
-# 2. HOURLY ZONE FEATURE STORE
+# 2. HOURLY ZONE FEATURE STORE (computed over buffer + target month so
+#    lag/rolling windows are correct at the start of the target month; only
+#    target-month rows are kept in the final SELECT below)
 print("\nBuilding hourly forecasting feature store...")
 
 con.execute(f"""
@@ -255,7 +322,7 @@ COPY (
             AVG(is_airport_dropoff::DOUBLE)
                 AS frac_airport_dropoff
 
-        FROM read_parquet('{TMP_FEATURES}')
+        FROM read_parquet('{TMP_FEATURES_MONTH}')
 
         GROUP BY
             PUZone,
@@ -289,7 +356,7 @@ COPY (
             ts_hour,
             COUNT(*) AS dropoff_count
 
-        FROM read_parquet('{TMP_FEATURES}')
+        FROM read_parquet('{TMP_FEATURES_MONTH}')
 
         GROUP BY
             DOZone,
@@ -597,26 +664,80 @@ COPY (
     )
 
     --------------------------------------------------------------------------
-    -- Final dataset
+    -- Final dataset — buffer rows dropped, only the target month is kept
     --------------------------------------------------------------------------
 
     SELECT *
     FROM shifted
 
     WHERE trip_count >= 5
+      AND ts_hour >= TIMESTAMP '{month_start:%Y-%m-%d}'
+      AND ts_hour <  TIMESTAMP '{month_end:%Y-%m-%d}'
 
     ORDER BY
         PUZone,
         ts_hour
 
-) TO '{TMP_TIMESERIES}' (FORMAT PARQUET)
+) TO '{TMP_TIMESERIES_MONTH}' (FORMAT PARQUET)
 """)
 
-with open(TMP_TIMESERIES, "rb") as f:
-    s3.upload_fileobj(f, S3_BUCKET, OUT_TS_S3_KEY)
-print(f"\nForecast-ready feature store uploaded to s3://{S3_BUCKET}/{OUT_TS_S3_KEY}")
 
-# 3. DATASET SUMMARY
+def upsert_month_to_s3(
+    s3_key: str,
+    new_month_local_path: str,
+    month_col: str,
+    extra_new_rows_filter: str = "TRUE",
+) -> None:
+    """Merge this run's freshly computed month into the existing S3 parquet.
+
+    Any previously stored rows for [month_start, month_end) are dropped and
+    replaced with the new ones (safe to re-run/backfill a month), everything
+    else in the store is left untouched. Falls back to writing the month
+    alone if the S3 object doesn't exist yet (first ever run).
+    """
+    month_filter = (
+        f"{month_col} >= TIMESTAMP '{month_start:%Y-%m-%d}' "
+        f"AND {month_col} < TIMESTAMP '{month_end:%Y-%m-%d}'"
+    )
+
+    existing_clause = None
+    try:
+        s3.download_file(S3_BUCKET, s3_key, TMP_EXISTING)
+        existing_clause = f"""
+            SELECT * FROM read_parquet('{TMP_EXISTING}')
+            WHERE NOT ({month_filter})
+        """
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") not in ("404", "NoSuchKey"):
+            raise
+        print(f"No existing s3://{S3_BUCKET}/{s3_key} yet — writing first month.")
+
+    new_rows_clause = f"""
+        SELECT * FROM read_parquet('{new_month_local_path}')
+        WHERE {month_filter} AND ({extra_new_rows_filter})
+    """
+
+    query = (
+        f"COPY ({existing_clause} UNION ALL BY NAME {new_rows_clause}) TO '{TMP_MERGED}' (FORMAT PARQUET)"
+        if existing_clause
+        else f"COPY ({new_rows_clause}) TO '{TMP_MERGED}' (FORMAT PARQUET)"
+    )
+    con.execute(query)
+
+    with open(TMP_MERGED, "rb") as f:
+        s3.upload_fileobj(f, S3_BUCKET, s3_key)
+
+
+# Trip-level output: only the target month is persisted (buffer rows were
+# only needed as context for the hourly window functions above).
+upsert_month_to_s3(OUT_TRIPS_S3_KEY, TMP_FEATURES_MONTH, month_col="tpep_pickup_datetime")
+print(f"Upserted {TARGET_MONTH} into s3://{S3_BUCKET}/{OUT_TRIPS_S3_KEY}")
+
+# Hourly timeseries output (TMP_TIMESERIES_MONTH is already target-month-only).
+upsert_month_to_s3(OUT_TS_S3_KEY, TMP_TIMESERIES_MONTH, month_col="ts_hour")
+print(f"Upserted {TARGET_MONTH} into s3://{S3_BUCKET}/{OUT_TS_S3_KEY}")
+
+# 3. DATASET SUMMARY (full feature store, post-upsert)
 summary = con.execute(f"""
     SELECT
         COUNT(*) AS rows,
@@ -625,13 +746,13 @@ summary = con.execute(f"""
         MAX(ts_hour) AS max_ts,
         AVG(target_rph) AS avg_rph,
         AVG(trip_count) AS avg_trip_count
-    FROM read_parquet('{TMP_TIMESERIES}')
+    FROM read_parquet('{TMP_MERGED}')
 """).fetchdf()
 
-print("\nDataset summary:")
+print("\nDataset summary (full store after this run's upsert):")
 print(summary.to_string(index=False))
 
-# 4. PREVIEW
+# 4. PREVIEW (target month only)
 preview = con.execute(f"""
     SELECT
 
@@ -681,7 +802,7 @@ preview = con.execute(f"""
         precipitation,
         temperature
 
-    FROM read_parquet('{TMP_TIMESERIES}')
+    FROM read_parquet('{TMP_TIMESERIES_MONTH}')
 
     ORDER BY ts_hour
 

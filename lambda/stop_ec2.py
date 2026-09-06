@@ -1,22 +1,3 @@
-# =============================================================================
-# Lambda: backup force-stop for the Airflow EC2 instance
-# =============================================================================
-# Trigger: EventBridge rule fired 8 hours after the start rule, e.g.
-#   Start rule:  cron(0 6 1 * ? *)   -> 06:00 UTC on the 1st
-#   Stop  rule:  cron(0 14 1 * ? *)  -> 14:00 UTC on the 1st
-#
-# This is a safety net: the instance normally stops itself via the
-# stop_self task in dags/training.py. This Lambda fires regardless
-# of what happened inside Airflow (crash, hang, failed task).
-#
-# Lambda execution role needs:
-#   {"Effect": "Allow", "Action": ["ec2:StopInstances", "ec2:DescribeInstances"],
-#    "Resource": "arn:aws:ec2:<region>:<account-id>:instance/<instance-id>"}
-#
-# Environment variable:
-#   INSTANCE_ID = i-0123456789abcdef0
-# =============================================================================
-
 import os
 
 import boto3

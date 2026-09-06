@@ -20,12 +20,20 @@
 #            --http-tokens required
 #    (alternatively run affected services with `network_mode: host`).
 #
-# 2. Webserver / MLflow / Flower ports are bound to 127.0.0.1 only.
+# 2. Webserver / Flower ports are bound to 127.0.0.1 only.
 #    The local-dev file maps them to 0.0.0.0, which on EC2 means "open to
 #    whatever the security group allows" — easy to accidentally expose the
 #    Airflow UI to the internet. Bind to localhost and reach them via an SSH
 #    tunnel (`ssh -L 8080:localhost:8080 ec2-user@<host>`) or put a reverse
 #    proxy with auth in front if you need regular browser access.
+#
+# 3. MLflow does not run on this box at all — it's hosted on a private
+#    Hugging Face Space (see mlflow_space/Dockerfile). MLFLOW_TRACKING_URI
+#    points at the Space's URL, and MLFLOW_TRACKING_TOKEN carries an HF
+#    access token that mlflow's client sends as a Bearer header automatically
+#    (no extra code — see requirements/airflow.txt already pulling in mlflow).
+#    Rationale: keeps experiment history/artifacts alive independent of this
+#    instance's stop/start cycle, and off the box entirely when it's stopped.
 #
 # Everything else (services, healthchecks, volumes, restart policies) is
 # unchanged — `restart: always` already means the stack comes back up after
@@ -53,8 +61,11 @@ x-airflow-common:
     # temporary credentials from the instance's IAM role via IMDS instead.
     AWS_REGION: ${AWS_REGION:-}
     S3_BUCKET: ${S3_BUCKET:-}
-    MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI:-http://mlflow:5000}
-    MLFLOW_TRACKING_INSECURE_TLS: "true"
+    # MLflow now lives on a private Hugging Face Space, not in this stack —
+    # see mlflow_space/Dockerfile. MLFLOW_TRACKING_TOKEN is an HF access
+    # token; mlflow's client sends it as a Bearer header automatically.
+    MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI}
+    MLFLOW_TRACKING_TOKEN: ${MLFLOW_TRACKING_TOKEN:-}
     ALERT_EMAIL: ${ALERT_EMAIL:-}
     SMTP_USER: ${SMTP_USER:-}
     SMTP_PASSWORD: ${SMTP_PASSWORD:-}
@@ -175,35 +186,6 @@ services:
       airflow-init:
         condition: service_completed_successfully
 
-  mlflow:
-    image: ghcr.io/mlflow/mlflow:v2.13.0
-    entrypoint: /bin/bash
-    command:
-      - -c
-      - |
-        pip install --no-cache-dir psycopg2-binary
-        mlflow server \
-          --backend-store-uri postgresql+psycopg2://airflow:airflow@postgres/mlflow \
-          --default-artifact-root s3://${S3_BUCKET}/mlflow \
-          --host 0.0.0.0 \
-          --port 5000
-    ports:
-      # Bound to localhost only — same reasoning as the webserver above.
-      - "127.0.0.1:5000:5000"
-    environment:
-      # No static AWS keys — relies on the instance's IAM role via IMDS,
-      # same as the airflow-common services (see header comment for the
-      # IMDSv2 hop-limit gotcha that needs fixing once on the host).
-      AWS_REGION: ${AWS_REGION:-}
-      MLFLOW_S3_ENDPOINT_URL: https://s3.amazonaws.com
-      MLFLOW_TRACKING_URI: http://mlflow:5000
-      MLFLOW_HOST: 0.0.0.0
-      GUNICORN_CMD_ARGS: "--bind 0.0.0.0:5000 --forwarded-allow-ips=*"
-      MLFLOW_SERVER_ALLOWED_HOSTS: "mlflow:5000,mlflow,localhost,127.0.0.1"
-    depends_on:
-      postgres:
-        condition: service_healthy
-
   airflow-init:
     <<: *airflow-common
     entrypoint: /bin/bash
@@ -300,4 +282,3 @@ services:
 
 volumes:
   postgres-db-volume:
-  mlflow-data:

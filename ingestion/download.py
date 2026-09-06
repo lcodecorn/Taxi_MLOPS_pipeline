@@ -153,9 +153,24 @@ def prune_s3_months(
     s3 = boto3.client("s3")
     prefix = "raw/"
 
-    latest_dt = datetime.strptime(latest_month, "%Y-%m")
+    paginator = s3.get_paginator("list_objects_v2")
+    existing: list[tuple[str, str]] = []  # (key, month)
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            m = re.search(rf"{re.escape(dataset_type)}_tripdata_(\d{{4}}-\d{{2}})\.parquet$", key)
+            if m:
+                existing.append((key, m.group(1)))
+
+    # Anchor the retention window on whichever is newer: the month this run is
+    # processing, or the newest month already on S3. Backfill/catchup runs process
+    # historical months out of order, so a run for an old month must not treat
+    # already-uploaded newer months as stale and delete them.
+    anchor_month = max([latest_month] + [month for _, month in existing])
+    anchor_dt = datetime.strptime(anchor_month, "%Y-%m")
+
     keep_set = set()
-    cur = latest_dt
+    cur = anchor_dt
     for _ in range(keep_months):
         keep_set.add(cur.strftime("%Y-%m"))
         if cur.month == 1:
@@ -164,21 +179,14 @@ def prune_s3_months(
             cur = cur.replace(month=cur.month - 1)
 
     deleted = []
-    paginator = s3.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        for obj in page.get("Contents", []):
-            key = obj["Key"]
-            m = re.search(rf"{re.escape(dataset_type)}_tripdata_(\d{{4}}-\d{{2}})\.parquet$", key)
-            if not m:
-                continue
-            month = m.group(1)
-            if month not in keep_set:
-                try:
-                    s3.delete_object(Bucket=bucket, Key=key)
-                    deleted.append(key)
-                    print(f"Deleted s3://{bucket}/{key}")
-                except ClientError as exc:
-                    print(f"Failed to delete s3://{bucket}/{key}: {exc}")
+    for key, month in existing:
+        if month not in keep_set:
+            try:
+                s3.delete_object(Bucket=bucket, Key=key)
+                deleted.append(key)
+                print(f"Deleted s3://{bucket}/{key}")
+            except ClientError as exc:
+                print(f"Failed to delete s3://{bucket}/{key}: {exc}")
 
     return deleted
 

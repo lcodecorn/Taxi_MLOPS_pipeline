@@ -257,7 +257,7 @@ def upload_and_log_artifacts(run: mlflow.ActiveRun) -> None:
         with open(artifact, "rb") as fh:
             s3.upload_fileobj(fh, S3_BUCKET, s3_key)
         mlflow.set_tag(f"s3_{artifact.stem}", f"s3://{S3_BUCKET}/{s3_key}")
-        print(f"  ✓ {artifact.name} → s3://{S3_BUCKET}/{s3_key}")
+        print(f"  {artifact.name} → s3://{S3_BUCKET}/{s3_key}")
 
 
 # Main

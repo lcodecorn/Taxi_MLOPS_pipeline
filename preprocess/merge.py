@@ -101,6 +101,9 @@ with tempfile.TemporaryDirectory() as tmp:
     )
 
     con = duckdb.connect()
+    con.execute("PRAGMA threads=4")
+    con.execute("PRAGMA memory_limit='3GB'")
+    con.execute("PRAGMA temp_directory='/tmp/duckdb_spill'")
     con.register("zones_df", zones)
 
     trips_glob = (trips_dir / "*.parquet").as_posix()

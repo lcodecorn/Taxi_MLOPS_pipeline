@@ -21,6 +21,8 @@ S3_BUCKET = get_secret("S3_BUCKET")
 FORECAST_PREFIX = "forecasts/"
 GEOJSON_KEY = "NYC_Taxi_Zones_20260602.geojson"
 
+API_BASE_URL = "https://lcodecorn-taxi-api.hf.space"
+
 
 # S3
 def get_s3_client():
@@ -100,6 +102,17 @@ def load_boundary_geojson():
 # STREAMLIT APP
 st.set_page_config(page_title="NYC Taxi Zone Forecast Map", layout="wide")
 
+st.markdown(
+    """
+    <style>
+    section[data-testid="stSidebar"] {
+        width: 400px !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 st.title("NYC Taxi Zone Forecast Map")
 
 df = load_forecast_dataframe()
@@ -125,6 +138,26 @@ metric = st.sidebar.selectbox(
     "Colour by",
     ["pred_rph", "pred_demand", "pred_competition", "opportunity_score"],
 )
+
+with st.sidebar.expander("API access"):
+    st.markdown(
+        f"""
+This map shows a snapshot of the latest pre-computed forecast.
+For live, on-demand forecasts (any time window or ranking signal),
+use the **Forecast API**:
+
+- Interactive docs: [{API_BASE_URL}/docs]({API_BASE_URL}/docs)
+- `GET /forecast?hours=24&top=10&rank_by=opportunity`
+- `GET /meta` — latest data hour & ranking options
+
+`rank_by` options: `demand`, `profit`, `competition`, `tip`, `opportunity`.
+
+Example:
+```
+{API_BASE_URL}/forecast?hours=12&top=5&rank_by=profit
+```
+"""
+    )
 
 # FILTER DATA
 hour_df = df[df["ts_hour"] == selected_ts]

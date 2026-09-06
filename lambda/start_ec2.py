@@ -1,20 +1,3 @@
-# =============================================================================
-# Lambda: start the Airflow EC2 instance ahead of the monthly DAG run
-# =============================================================================
-# Trigger: EventBridge scheduled rule, e.g.
-#   cron(0 6 1 * ? *)   -> 06:00 UTC on the 1st of every month
-#
-# Lambda execution role needs an inline policy like:
-#   {
-#     "Effect": "Allow",
-#     "Action": "ec2:StartInstances",
-#     "Resource": "arn:aws:ec2:<region>:<account-id>:instance/<instance-id>"
-#   }
-#
-# Environment variable:
-#   INSTANCE_ID = i-0123456789abcdef0
-# =============================================================================
-
 import os
 
 import boto3

@@ -8,11 +8,15 @@ Examples:
   GET /forecast?start=2024-06-01T08:00:00&hours=6&rank_by=demand
 """""
 
+import logging
 from datetime import datetime
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from api.engine import (
     FORECAST_TARGETS,
@@ -21,11 +25,26 @@ from api.engine import (
     latest_available_hour,
 )
 
+
+class _SuppressHealthCheckNoise(logging.Filter):
+    """Drop access-log lines for HF Spaces' '/?logs=container' keepalive pings."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return "logs=container" not in message
+
+
+logging.getLogger("uvicorn.access").addFilter(_SuppressHealthCheckNoise())
+
+limiter = Limiter(key_func=get_remote_address)
+
 app = FastAPI(
     title="NYC Taxi Forecast API",
     description="Pick a time frame and a signal to forecast zone-level taxi opportunities.",
     version="1.0.0",
 )
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
 class ForecastRow(BaseModel):
@@ -53,6 +72,11 @@ class ForecastResponse(BaseModel):
     rows: list[ForecastRow]
 
 
+@app.get("/")
+def root():
+    return {"status": "ok", "docs": "/docs"}
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -69,7 +93,9 @@ def meta():
 
 
 @app.get("/forecast", response_model=ForecastResponse)
+@limiter.limit("5/minute")
 def forecast(
+    request: Request,
     hours: int = Query(24, ge=1, le=168, description="Number of future hours to forecast"),
     start: Optional[datetime] = Query(
         None, description="Forecast start datetime (defaults to last known data hour + 1)"
